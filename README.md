@@ -11,8 +11,4 @@ Choose option 1 for real auth log or option 2 for sample testing.
 - Flags IPs that exceed the threshold (default: 5 attempts)
 - Recommends UFW firewall commands to block suspicious IPs
 
-## Concepts Demonstrated
-- Log file parsing and analysis
-- Regex pattern matching
-- SSH attack pattern recognition
-- Linux system security
+
