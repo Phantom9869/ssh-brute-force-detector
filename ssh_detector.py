@@ -1,4 +1,6 @@
 # ssh_brute_detector.py
+from __future__ import annotations
+
 import re
 import json
 import ipaddress
@@ -119,19 +121,57 @@ class ScanResult:
 
 # ── Log parsing ───────────────────────────────────────────────────────
 
-# Handles: "Jan  5 14:23:01" and "Jan 15 14:23:01" (syslog, auth.log, journald)
-_TS = r"(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})"
+# Handles syslog stamps ("Jan  5 14:23:01", "Jan 15 14:23:01") and ISO-8601
+# stamps ("2026-04-20T10:00:01", with optional fraction and UTC offset), as
+# written by rsyslog's RFC 3339 template and journald exports.
+_TS = (
+    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+    r"|\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})"
+)
 
 _FAILED_RE   = re.compile(_TS + r".*Failed password for (?:invalid user )?(\S+) from ([\d.]+) port (\d+)")
 _INVALID_RE  = re.compile(_TS + r".*Invalid user (\S+) from ([\d.]+)(?:\s+port (\d+))?")
 _ACCEPTED_RE = re.compile(_TS + r".*Accepted (?:password|publickey) for (\S+) from ([\d.]+) port (\d+)")
 
-def _parse_ts(raw: str) -> datetime:
-    try:
-        normalized = " ".join(raw.strip().split())   # collapse "Jan  5" → "Jan 5"
-        return datetime.strptime(f"{datetime.now().year} {normalized}", "%Y %b %d %H:%M:%S")
-    except ValueError:
-        return datetime.now()
+_ISO_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?(Z|[+-]\d{2}:?\d{2})?$"
+)
+
+def _parse_ts(raw: str, now: datetime | None = None) -> datetime | None:
+    """
+    Turn a log timestamp into a naive local datetime, or None if it can't be read.
+
+    Syslog stamps carry no year, so assume the current one, falling back to the
+    previous year when that would put the entry in the future (a December line
+    read in January) or the date doesn't exist (Feb 29 in a non-leap year).
+    """
+    now = now or datetime.now()
+    raw = raw.strip()
+
+    m = _ISO_RE.match(raw)
+    if m:
+        date, clock, tz = m.groups()
+        if tz == "Z":
+            tz = "+00:00"
+        elif tz and ":" not in tz:
+            tz = tz[:3] + ":" + tz[3:]
+        try:
+            parsed = datetime.fromisoformat(f"{date}T{clock}{tz or ''}")
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+
+    normalized = " ".join(raw.split())   # collapse "Jan  5" -> "Jan 5"
+    for year in (now.year, now.year - 1):
+        try:
+            parsed = datetime.strptime(f"{year} {normalized}", "%Y %b %d %H:%M:%S")
+        except ValueError:
+            continue
+        if parsed <= now + timedelta(days=1):
+            return parsed
+    return None
 
 def _parse_line(line: str) -> Attempt | None:
     for pattern, success in (
@@ -143,7 +183,10 @@ def _parse_line(line: str) -> Attempt | None:
         if m:
             ts_str, user, ip = m.group(1), m.group(2), m.group(3)
             port = int(m.group(4)) if m.group(4) else 22
-            return Attempt(_parse_ts(ts_str), ip, user, port, success)
+            ts = _parse_ts(ts_str)
+            if ts is None:
+                return None
+            return Attempt(ts, ip, user, port, success)
     return None
 
 # ── Core ──────────────────────────────────────────────────────────────
