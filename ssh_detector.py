@@ -18,6 +18,8 @@ class Attempt:
     user:      str
     port:      int
     success:   bool
+    pid:       str | None = None   # sshd process id, when the line carries one
+    probe:     bool = False        # an "Invalid user" notice rather than a password try
 
 @dataclass
 class IPReport:
@@ -129,6 +131,8 @@ _TS = (
     r"|\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})"
 )
 
+_PID_RE = re.compile(r"sshd(?:-session)?\[(\d+)\]")
+
 _FAILED_RE   = re.compile(_TS + r".*Failed password for (?:invalid user )?(\S+) from ([\d.]+) port (\d+)")
 _INVALID_RE  = re.compile(_TS + r".*Invalid user (\S+) from ([\d.]+)(?:\s+port (\d+))?")
 _ACCEPTED_RE = re.compile(_TS + r".*Accepted (?:password|publickey) for (\S+) from ([\d.]+) port (\d+)")
@@ -186,7 +190,12 @@ def _parse_line(line: str) -> Attempt | None:
             ts = _parse_ts(ts_str)
             if ts is None:
                 return None
-            return Attempt(ts, ip, user, port, success)
+            pid = _PID_RE.search(line)
+            return Attempt(
+                ts, ip, user, port, success,
+                pid=pid.group(1) if pid else None,
+                probe=pattern is _INVALID_RE,
+            )
     return None
 
 # ── Core ──────────────────────────────────────────────────────────────
@@ -216,9 +225,16 @@ def analyze_log(
 
     cutoff = datetime.now() - timedelta(minutes=time_window) if time_window else None
 
-    for line in lines:
-        attempt = _parse_line(line)
-        if not attempt or (cutoff and attempt.timestamp < cutoff):
+    parsed = [a for a in map(_parse_line, lines) if a]
+
+    # sshd logs a probe of an unknown account twice: "Invalid user X from ..."
+    # and then "Failed password for invalid user X from ..." for each try. Count
+    # the password failures and drop the notice they already account for.
+    tried = {(a.pid, a.ip, a.user) for a in parsed if not a.probe and not a.success}
+    parsed = [a for a in parsed if not (a.probe and (a.pid, a.ip, a.user) in tried)]
+
+    for attempt in parsed:
+        if cutoff and attempt.timestamp < cutoff:
             continue
         if attempt.ip not in reports:
             reports[attempt.ip] = IPReport(ip=attempt.ip)
