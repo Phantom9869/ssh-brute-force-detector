@@ -57,7 +57,9 @@ class IPReport:
 
     @property
     def subnet(self) -> str:
-        return str(ipaddress.ip_network(f"{self.ip}/24", strict=False))
+        """The /24 (IPv4) or /64 (IPv6) the address belongs to."""
+        prefix = 24 if ipaddress.ip_address(self.ip).version == 4 else 64
+        return str(ipaddress.ip_network(f"{self.ip}/{prefix}", strict=False))
 
     @property
     def breach_likely(self) -> bool:
@@ -67,6 +69,15 @@ class IPReport:
         if not failures or not successes:
             return False
         return min(s.timestamp for s in successes) > min(f.timestamp for f in failures)
+
+def is_whitelisted(ip: str, whitelist: set[str]) -> bool:
+    """True if ip equals, or falls inside, any whitelist entry (address or CIDR)."""
+    addr = ipaddress.ip_address(ip)
+    for entry in whitelist:
+        net = ipaddress.ip_network(entry, strict=False)
+        if net.version == addr.version and addr in net:
+            return True
+    return False
 
 @dataclass
 class ScanResult:
@@ -81,7 +92,7 @@ class ScanResult:
     def suspicious(self) -> list[IPReport]:
         return sorted(
             [r for ip, r in self.reports.items()
-             if r.failed >= self.threshold and ip not in self.whitelist],
+             if r.failed >= self.threshold and not is_whitelisted(ip, self.whitelist)],
             key=lambda r: r.failed, reverse=True,
         )
 
@@ -91,7 +102,7 @@ class ScanResult:
 
     @property
     def subnet_clusters(self) -> dict[str, list[str]]:
-        """Multiple IPs from the same /24 = likely coordinated attack."""
+        """Multiple IPs from the same /24 (IPv4) or /64 (IPv6) = likely coordinated attack."""
         clusters: dict[str, list[str]] = defaultdict(list)
         for r in self.suspicious:
             clusters[r.subnet].append(r.ip)
@@ -133,9 +144,9 @@ _TS = (
 
 _PID_RE = re.compile(r"sshd(?:-session)?\[(\d+)\]")
 
-_FAILED_RE   = re.compile(_TS + r".*Failed password for (?:invalid user )?(\S+) from ([\d.]+) port (\d+)")
-_INVALID_RE  = re.compile(_TS + r".*Invalid user (\S+) from ([\d.]+)(?:\s+port (\d+))?")
-_ACCEPTED_RE = re.compile(_TS + r".*Accepted (?:password|publickey) for (\S+) from ([\d.]+) port (\d+)")
+_FAILED_RE   = re.compile(_TS + r".*Failed password for (?:invalid user )?(\S+) from ([0-9A-Fa-f:.]+) port (\d+)")
+_INVALID_RE  = re.compile(_TS + r".*Invalid user (\S+) from ([0-9A-Fa-f:.]+)(?:\s+port (\d+))?")
+_ACCEPTED_RE = re.compile(_TS + r".*Accepted (?:password|publickey) for (\S+) from ([0-9A-Fa-f:.]+) port (\d+)")
 
 _ISO_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?(Z|[+-]\d{2}:?\d{2})?$"
@@ -190,6 +201,10 @@ def _parse_line(line: str) -> Attempt | None:
             ts = _parse_ts(ts_str)
             if ts is None:
                 return None
+            try:
+                ip = str(ipaddress.ip_address(ip))   # reject junk, normalise IPv6
+            except ValueError:
+                return None
             pid = _PID_RE.search(line)
             return Attempt(
                 ts, ip, user, port, success,
@@ -212,10 +227,15 @@ def analyze_log(
     Args:
         log_file:    Path to log file (auth.log, syslog, journald export).
         threshold:   Min failed attempts before an IP is flagged suspicious.
-        whitelist:   IPs to ignore (your jump host, monitoring servers, etc.).
+        whitelist:   IPs or CIDR ranges to ignore (jump host, monitoring, office network).
         time_window: Only count attempts within the last N minutes.
     """
-    whitelist = whitelist or set()
+    whitelist = set(whitelist or ())
+    for entry in whitelist:
+        try:
+            ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            raise ValueError(f"Invalid whitelist entry (expected IP or CIDR): '{entry}'") from None
     reports: dict[str, IPReport] = {}
 
     try:
@@ -268,11 +288,12 @@ def display(result: ScanResult) -> None:
         return
 
     # ── Summary table ──
-    print(f"  {'IP':<18} {'FAILS':>6} {'OK':>4} {'RATE/min':>9}  STATUS")
+    ipw = max(18, *(len(r.ip) for r in suspicious))   # IPv6 addresses are wider
+    print(f"  {'IP':<{ipw}} {'FAILS':>6} {'OK':>4} {'RATE/min':>9}  STATUS")
     print(f"  {'─'*(_W-2)}")
     for r in suspicious:
         tag = "🔴 BREACH " if r.breach_likely else "⚠️  SUSPECT"
-        print(f"  {r.ip:<18} {r.failed:>6} {r.succeeded:>4} {r.rate_per_min:>8.1f}  {tag}")
+        print(f"  {r.ip:<{ipw}} {r.failed:>6} {r.succeeded:>4} {r.rate_per_min:>8.1f}  {tag}")
 
     # ── Per-IP detail ──
     print(f"\n{'─'*_W}")
@@ -396,11 +417,11 @@ if __name__ == "__main__":
         result = analyze_log(
             log,
             threshold=thresh,
-            whitelist=set(ip.strip() for ip in wl.split(",")) if wl else None,
+            whitelist=set(ip.strip() for ip in wl.split(",") if ip.strip()) if wl else None,
             time_window=int(win) if win else None,
         )
         display(result)
         if out:
             save_report(result, out)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
