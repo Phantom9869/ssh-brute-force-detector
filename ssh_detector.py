@@ -239,9 +239,17 @@ def analyze_log(
     reports: dict[str, IPReport] = {}
 
     try:
-        lines = Path(log_file).read_text().splitlines()
+        # Logs can hold stray non-UTF-8 bytes (attackers control usernames), so
+        # decode leniently rather than crash on the first one.
+        lines = Path(log_file).read_text(encoding="utf-8", errors="replace").splitlines()
     except FileNotFoundError:
-        raise FileNotFoundError(f"Log file not found: '{log_file}'")
+        raise FileNotFoundError(f"Log file not found: '{log_file}'") from None
+    except PermissionError:
+        raise PermissionError(
+            f"Permission denied reading '{log_file}' (try sudo, or copy the log first)"
+        ) from None
+    except IsADirectoryError:
+        raise IsADirectoryError(f"'{log_file}' is a directory, not a log file") from None
 
     cutoff = datetime.now() - timedelta(minutes=time_window) if time_window else None
 
@@ -273,10 +281,22 @@ def analyze_log(
 
 _W = 62
 
+def safe(text: str, limit: int = 64) -> str:
+    """
+    Make attacker-controlled text (usernames come straight from the log) safe
+    to print: control characters, including ESC, are shown as \\xNN escapes so
+    they can't rewrite the terminal, and very long values are truncated.
+    """
+    out = "".join(
+        c if c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}"
+        for c in text
+    )
+    return out if len(out) <= limit else out[: limit - 1] + "…"
+
 def display(result: ScanResult) -> None:
     print(f"\n{'─'*_W}")
     print(f"  SSH Brute Force Detector")
-    print(f"  Log     : {result.log_file}")
+    print(f"  Log     : {safe(result.log_file, 200)}")
     print(f"  Lines   : {result.total_lines:,}")
     print(f"  Scanned : {result.scanned_at.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Thresh  : ≥{result.threshold} failed attempts")
@@ -300,7 +320,7 @@ def display(result: ScanResult) -> None:
     print("  DETAIL\n")
     for r in suspicious:
         span  = str(r.duration).split(".")[0]
-        users = ", ".join(sorted(r.usernames)) or "—"
+        users = ", ".join(safe(u) for u in sorted(r.usernames)) or "—"
         print(f"  ▸ {r.ip}")
         print(f"    Usernames tried : {users}")
         print(f"    First seen      : {r.first_seen.strftime('%b %d %H:%M:%S')}")
@@ -408,12 +428,13 @@ if __name__ == "__main__":
         print("Invalid choice.")
         raise SystemExit(1)
 
-    thresh = int(input("Threshold      [5]: ").strip() or 5)
+    thresh_raw = input("Threshold      [5]: ").strip()
     win    = input("Time window mins (blank = all): ").strip()
-    wl     = input("Whitelist IPs, comma-separated (blank = none): ").strip()
+    wl     = input("Whitelist IPs/CIDRs, comma-separated (blank = none): ").strip()
     out    = input("Save JSON report to (blank = skip): ").strip() or None
 
     try:
+        thresh = int(thresh_raw or 5)
         result = analyze_log(
             log,
             threshold=thresh,
@@ -423,5 +444,6 @@ if __name__ == "__main__":
         display(result)
         if out:
             save_report(result, out)
-    except (FileNotFoundError, ValueError) as e:
+    except (OSError, ValueError) as e:
         print(f"Error: {e}")
+        raise SystemExit(1)
