@@ -98,3 +98,26 @@ def test_cli_happy_path_on_sample_log():
     proc = run_cli("2", str(ROOT / "sample_auth.log"), "2", "", "", "")
     assert proc.returncode == 0
     assert "192.168.1.101" in proc.stdout
+
+
+@pytest.mark.parametrize("threshold", [0, -1, 1.5, True])
+def test_non_positive_threshold_is_rejected(tmp_path, threshold):
+    log = tmp_path / "auth.log"
+    log.write_text("Nov 20 10:00:00 h sshd[1]: Failed password for root from 192.0.2.1 port 22 ssh2\n")
+    with pytest.raises(ValueError, match="Threshold must be an integer of at least 1"):
+        d.analyze_log(str(log), threshold=threshold)
+
+
+@pytest.mark.parametrize("window", [0, -5, 2.5, True])
+def test_non_positive_time_window_is_rejected(tmp_path, window):
+    log = tmp_path / "auth.log"
+    log.write_text("Nov 20 10:00:00 h sshd[1]: Failed password for root from 192.0.2.1 port 22 ssh2\n")
+    with pytest.raises(ValueError, match="Time window must be a positive number of minutes"):
+        d.analyze_log(str(log), threshold=5, time_window=window)
+
+
+def test_cli_zero_threshold_is_an_error_not_a_traceback():
+    proc = run_cli("2", str(ROOT / "sample_auth.log"), "0", "", "", "")
+    assert proc.returncode == 1
+    assert "Threshold must be an integer of at least 1" in proc.stdout
+    assert "Traceback" not in proc.stderr

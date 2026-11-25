@@ -230,6 +230,12 @@ def analyze_log(
         whitelist:   IPs or CIDR ranges to ignore (jump host, monitoring, office network).
         time_window: Only count attempts within the last N minutes.
     """
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1:
+        raise ValueError("Threshold must be an integer of at least 1.")
+    if time_window is not None and (
+        isinstance(time_window, bool) or not isinstance(time_window, int) or time_window < 1
+    ):
+        raise ValueError("Time window must be a positive number of minutes.")
     whitelist = set(whitelist or ())
     for entry in whitelist:
         try:
