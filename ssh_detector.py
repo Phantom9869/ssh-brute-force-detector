@@ -144,7 +144,7 @@ _TS = (
 
 _PID_RE = re.compile(r"sshd(?:-session)?\[(\d+)\]")
 
-_FAILED_RE   = re.compile(_TS + r".*Failed password for (?:invalid user )?(\S+) from ([0-9A-Fa-f:.]+) port (\d+)")
+_FAILED_RE   = re.compile(_TS + r".*Failed (?:password|publickey|keyboard-interactive(?:/\w+)?|none) for (?:invalid user )?(\S+) from ([0-9A-Fa-f:.]+) port (\d+)")
 _INVALID_RE  = re.compile(_TS + r".*Invalid user (\S+) from ([0-9A-Fa-f:.]+)(?:\s+port (\d+))?")
 _ACCEPTED_RE = re.compile(_TS + r".*Accepted (?:password|publickey) for (\S+) from ([0-9A-Fa-f:.]+) port (\d+)")
 

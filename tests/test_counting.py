@@ -63,3 +63,38 @@ def test_breach_detection_unchanged_by_dedupe(tmp_path):
     ])
     result = d.analyze_log(log, threshold=2)
     assert [r.ip for r in result.breaches] == ["192.0.2.50"]
+
+
+def test_failed_publickey_and_keyboard_interactive_count(tmp_path):
+    log = write(tmp_path, [
+        "Nov 20 10:00:00 h sshd[10]: Failed publickey for alice from 203.0.113.20 port 22 ssh2",
+        "Nov 20 10:00:01 h sshd[11]: Failed keyboard-interactive for alice from 203.0.113.20 port 22 ssh2",
+        "Nov 20 10:00:02 h sshd[12]: Failed keyboard-interactive/pam for alice from 203.0.113.20 port 22 ssh2",
+        "Nov 20 10:00:03 h sshd[13]: Failed none for alice from 203.0.113.20 port 22 ssh2",
+        "Nov 20 10:00:04 h sshd[14]: Failed password for alice from 203.0.113.20 port 22 ssh2",
+    ])
+    result = d.analyze_log(log, threshold=5)
+    assert result.reports["203.0.113.20"].failed == 5
+    assert [r.ip for r in result.suspicious] == ["203.0.113.20"]
+
+
+def test_failed_publickey_for_invalid_user_is_deduped_with_probe(tmp_path):
+    log = write(tmp_path, [
+        "Nov 20 10:00:00 h sshd[20]: Invalid user bob from 198.51.100.7 port 22",
+        "Nov 20 10:00:00 h sshd[20]: Failed publickey for invalid user bob from 198.51.100.7 port 22 ssh2",
+        "Nov 20 10:00:02 h sshd[21]: Invalid user bob from 198.51.100.7 port 22",
+        "Nov 20 10:00:02 h sshd[21]: Failed publickey for invalid user bob from 198.51.100.7 port 22 ssh2",
+        "Nov 20 10:00:04 h sshd[22]: Invalid user bob from 198.51.100.7 port 22",
+        "Nov 20 10:00:04 h sshd[22]: Failed publickey for invalid user bob from 198.51.100.7 port 22 ssh2",
+    ])
+    result = d.analyze_log(log, threshold=3)
+    assert result.reports["198.51.100.7"].failed == 3
+
+
+def test_parse_line_reads_failed_publickey():
+    a = d._parse_line(
+        "Nov 20 10:00:00 h sshd[42]: Failed publickey for root from 192.0.2.8 port 2222 ssh2"
+    )
+    assert a is not None
+    assert a.success is False and a.probe is False
+    assert a.ip == "192.0.2.8" and a.user == "root" and a.port == 2222
